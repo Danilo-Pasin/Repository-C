@@ -1,0 +1,283 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <ctype.h>
+
+#define N 9
+#define NN (N*N)
+#define INDEX(r,c) ((r)*N + (c))
+
+// ----------------------------- PILHA ---------------------------------
+
+typedef struct {
+    int idx;           // índice linear [0..80] da célula sendo tentada
+    uint16_t cand;     // bitmask de candidatos possíveis (bits 1..9)
+    uint16_t tried;    // bitmask de candidatos já testados
+} Frame;
+
+typedef struct {
+    Frame *data;   // vetor dinâmico
+    int top;       // topo (próxima posição livre)
+    int cap;       // capacidade
+} Stack;
+
+static void stack_init(Stack *s) {
+    s->cap = 64;
+    s->top = 0;
+    s->data = (Frame*) malloc(sizeof(Frame) * s->cap);
+    if (!s->data) { fprintf(stderr, "Falha de memória\n"); exit(1); }
+}
+
+static void stack_free(Stack *s) {
+    free(s->data);
+    s->data = NULL;
+    s->top = s->cap = 0;
+}
+
+static void stack_push(Stack *s, Frame f) {
+    if (s->top >= s->cap) {
+        s->cap *= 2;
+        Frame *novo = (Frame*) realloc(s->data, sizeof(Frame) * s->cap);
+        if (!novo) { fprintf(stderr, "Falha de memória (realloc)\n"); exit(1); }
+        s->data = novo;
+    }
+    s->data[s->top++] = f;
+}
+
+static int stack_empty(const Stack *s) { return s->top == 0; }
+
+static Frame stack_pop(Stack *s) {
+    if (stack_empty(s)) { fprintf(stderr, "Pop em pilha vazia\n"); exit(1); }
+    return s->data[--s->top];
+}
+
+// ------------------------ UTIL & BITMASK ------------------------------
+
+static inline int row_of(int idx){ return idx / N; }
+static inline int col_of(int idx){ return idx % N; }
+
+// bit 1 corresponde ao dígito 1, bit 9 ao dígito 9
+static inline uint16_t bit_of(int d){ return (uint16_t)(1u << d); }
+
+// retorna máscara com bits 1..9 ligados
+static inline uint16_t full_mask(){ return (uint16_t)0x3FE; } // 0b11_1111_1110
+
+// pega o menor dígito ainda não tentado de (cand \ tried); retorna 0 se nenhum
+static int next_digit(uint16_t cand, uint16_t tried){
+    uint16_t left = (uint16_t)(cand & ~tried);
+    if (!left) return 0;
+    // pega o bit menos significativo
+    int d = 1;
+    while (d <= 9){
+        if (left & bit_of(d)) return d;
+        d++;
+    }
+    return 0;
+}
+
+// ----------------------- REGRAS DO SUDOKU -----------------------------
+
+// Verifica se colocar 'd' em board[idx] é válido segundo linha/coluna/box.
+static int can_place(const int *board, int idx, int d){
+    if (d < 1 || d > 9) return 0;
+    int r = row_of(idx), c = col_of(idx);
+    // linha
+    for (int j = 0; j < N; j++){
+        int v = board[INDEX(r,j)];
+        if (v == d) return 0;
+    }
+    // coluna
+    for (int i = 0; i < N; i++){
+        int v = board[INDEX(i,c)];
+        if (v == d) return 0;
+    }
+    // subquadrante 3x3
+    int r0 = (r/3)*3, c0 = (c/3)*3;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++){
+            int v = board[INDEX(r0+i, c0+j)];
+            if (v == d) return 0;
+        }
+    return 1;
+}
+
+// Calcula máscara de candidatos válidos para board[idx]
+static uint16_t candidates(const int *board, int idx){
+    if (board[idx] != 0) return 0; // já preenchido
+    uint16_t m = full_mask();
+    int r = row_of(idx), c = col_of(idx);
+
+    // linha
+    for (int j = 0; j < N; j++){
+        int v = board[INDEX(r,j)];
+        if (v) m &= (uint16_t)~bit_of(v);
+    }
+    // coluna
+    for (int i = 0; i < N; i++){
+        int v = board[INDEX(i,c)];
+        if (v) m &= (uint16_t)~bit_of(v);
+    }
+    // subquadrante
+    int r0 = (r/3)*3, c0 = (c/3)*3;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++){
+            int v = board[INDEX(r0+i, c0+j)];
+            if (v) m &= (uint16_t)~bit_of(v);
+        }
+    return m;
+}
+
+// Escolhe a próxima célula vazia com menos candidatos (heurística MRV simples)
+static int pick_next_cell(const int *board){
+    int best_idx = -1;
+    int best_count = 10;
+    for (int idx = 0; idx < NN; idx++){
+        if (board[idx] == 0){
+            uint16_t cand = candidates(board, idx);
+            // conta bits
+            int c = 0;
+            for (int d = 1; d <= 9; d++) if (cand & bit_of(d)) c++;
+            if (c == 0) return idx; // sem candidatos -> forçar backtrack logo
+            if (c < best_count){
+                best_count = c;
+                best_idx = idx;
+                if (best_count == 1) return best_idx;
+            }
+        }
+    }
+    return best_idx; // -1 se não há vazios
+}
+
+// --------------------------- LEITURA/SAÍDA ----------------------------
+
+static int read_board(int *board){
+    // Lê 9 linhas, ignorando espaços; aceita '0' para vazio.
+    int count = 0;
+    while (count < NN){
+        int ch = getchar();
+        if (ch == EOF) break;
+        if (isspace(ch)) continue;
+        if (!isdigit(ch)) return 0;
+        int v = ch - '0';
+        if (v < 0 || v > 9) return 0;
+        board[count++] = v;
+    }
+    return count == NN;
+}
+
+static void print_board(const int *board){
+    for (int r = 0; r < N; r++){
+        for (int c = 0; c < N; c++){
+            printf("%d", board[INDEX(r,c)]);
+        }
+        printf("\n");
+    }
+}
+
+// ------------------------------ SOLVER --------------------------------
+
+static int solve(int *board){
+    Stack st; stack_init(&st);
+
+    // enquanto houver células vazias
+    while (1){
+        int idx = pick_next_cell(board);
+        if (idx == -1){
+            // resolvido
+            stack_free(&st);
+            return 1;
+        }
+
+        uint16_t cand = candidates(board, idx);
+        Frame f = { idx, cand, 0 };
+
+        // tentar um dígito; se não houver, precisamos retroceder
+        int d = next_digit(f.cand, f.tried);
+        if (!d){
+            // backtrack: subir pilha até achar alternativa
+            int backtracked = 0;
+            while (!stack_empty(&st)){
+                Frame prev = stack_pop(&st);
+                // limpar a célula que foi escolhida nesse frame
+                board[prev.idx] = 0;
+                // tentar próximo dígito para esse frame
+                int d2;
+                while ((d2 = next_digit(prev.cand, prev.tried)) != 0){
+                    if (can_place(board, prev.idx, d2)){
+                        // coloca e avança
+                        prev.tried |= bit_of(d2);
+                        board[prev.idx] = d2;
+                        stack_push(&st, prev);
+                        backtracked = 1;
+                        break;
+                    } else {
+                        prev.tried |= bit_of(d2);
+                    }
+                }
+                if (backtracked) break;
+            }
+            if (!backtracked){
+                stack_free(&st);
+                return 0; // sem solução
+            }
+            // continua o loop principal, pois já colocamos um novo valor
+            continue;
+        }
+
+        // Para a célula escolhida agora, empurramos frame tentando o primeiro dígito válido,
+        // e se válido seguimos; se não, vamos para o backtrack imediatamente.
+        int placed = 0;
+        while ((d = next_digit(f.cand, f.tried)) != 0){
+            f.tried |= bit_of(d);
+            if (can_place(board, f.idx, d)){
+                board[f.idx] = d;
+                stack_push(&st, f);
+                placed = 1;
+                break;
+            }
+        }
+        if (!placed){
+            // não deu na célula atual -> força ciclo de backtrack
+            int backtracked = 0;
+            while (!stack_empty(&st)){
+                Frame prev = stack_pop(&st);
+                board[prev.idx] = 0;
+                int d2;
+                while ((d2 = next_digit(prev.cand, prev.tried)) != 0){
+                    prev.tried |= bit_of(d2);
+                    if (can_place(board, prev.idx, d2)){
+                        board[prev.idx] = d2;
+                        stack_push(&st, prev);
+                        backtracked = 1;
+                        break;
+                    }
+                }
+                if (backtracked) break;
+            }
+            if (!backtracked){
+                stack_free(&st);
+                return 0;
+            }
+        }
+        // volta ao while para escolher nova célula
+    }
+}
+
+int main(void){
+    int *board = (int*) malloc(sizeof(int) * NN); // uso explícito de ponteiro
+    if (!board){ fprintf(stderr, "Falha de memória\n"); return 1; }
+
+    if (!read_board(board)){
+        fprintf(stderr, "Entrada inválida. Forneça 9 linhas com 9 dígitos (0..9).\n");
+        free(board);
+        return 1;
+    }
+
+    if (solve(board)){
+        print_board(board);
+    } else {
+        printf("Sem solucao\n");
+    }
+    free(board);
+    return 0;
+}
